@@ -1,0 +1,12 @@
+# 用户配置（包含敏感信息）
+config.json
+
+# 日志文件
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

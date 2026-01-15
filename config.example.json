@@ -1,0 +1,8 @@
+{
+  "bark_key": "",
+  "bark_server": "https://api.day.app",
+  "bark_sound": "minuet",
+  "bark_group": "claude",
+  "mac_notification": true,
+  "mac_sound": "Glass"
+}
