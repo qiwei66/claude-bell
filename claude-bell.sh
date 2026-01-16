@@ -71,61 +71,46 @@ find_transcript() {
     echo ""
 }
 
-# --- 提取任务摘要 ---
-extract_summary() {
+# --- 提取任务摘要和状态 ---
+extract_summary_and_status() {
     local transcript="$1"
 
     if [[ -z "$transcript" || ! -f "$transcript" ]]; then
         debug "No transcript file found"
-        echo "任务已完成"
+        echo "success|任务已完成"
         return
     fi
 
     debug "Extracting summary from: $transcript"
 
-    # 尝试使用 Python 摘要提取器
+    # 使用 Python 摘要提取器（返回格式: status|summary）
     if [[ -x "${SCRIPT_DIR}/extract-summary.py" ]]; then
-        local summary
-        summary=$("${SCRIPT_DIR}/extract-summary.py" "$transcript" 2>/dev/null) || true
-        if [[ -n "$summary" && "$summary" != "任务完成" ]]; then
-            debug "Python extractor returned: $summary"
-            echo "$summary"
+        local result
+        result=$("${SCRIPT_DIR}/extract-summary.py" "$transcript" 2>/dev/null) || true
+        if [[ -n "$result" ]]; then
+            debug "Python extractor returned: $result"
+            echo "$result"
             return
         fi
     fi
 
-    # 降级：从 transcript 提取最后的用户消息
-    local user_query
-    user_query=$(grep '"type":"user"' "$transcript" 2>/dev/null | tail -1 | jq -r '.content // empty' 2>/dev/null | head -c 80) || true
-
-    if [[ -n "$user_query" ]]; then
-        debug "Fallback extraction: $user_query"
-        echo "${user_query}..."
-    else
-        # 统计工具调用
-        local tool_count
-        tool_count=$(grep -c '"type":"tool_use"' "$transcript" 2>/dev/null || echo "0")
-        echo "任务完成 (工具调用: ${tool_count} 次)"
-    fi
+    # 降级：简单返回
+    echo "success|任务完成"
 }
 
-# --- 确定通知类型和图标 ---
+# --- 根据状态确定通知类型 ---
 get_notification_type() {
-    local event="$1"
-    local summary="$2"
+    local status="$1"
 
-    case "$event" in
-        "Stop")
-            echo "✅ 任务完成"
+    case "$status" in
+        "error")
+            echo "❌ 任务失败"
             ;;
-        "Notification")
-            if echo "$summary" | grep -qi "permission\|确认\|approve"; then
-                echo "⚠️ 需要确认"
-            elif echo "$summary" | grep -qi "error\|失败\|fail"; then
-                echo "❌ 任务失败"
-            else
-                echo "💬 通知"
-            fi
+        "action_needed")
+            echo "⚠️ 需要操作"
+            ;;
+        "success")
+            echo "✅ 任务完成"
             ;;
         *)
             echo "🔔 Claude Bell"
@@ -133,19 +118,25 @@ get_notification_type() {
     esac
 }
 
-# --- 获取摘要 ---
+# --- 获取摘要和状态 ---
 ACTUAL_TRANSCRIPT=$(find_transcript "$SESSION_ID" "$TRANSCRIPT_PATH")
 debug "Using transcript: $ACTUAL_TRANSCRIPT"
 
-SUMMARY=$(extract_summary "$ACTUAL_TRANSCRIPT")
-debug "Summary: $SUMMARY"
+SUMMARY_RESULT=$(extract_summary_and_status "$ACTUAL_TRANSCRIPT")
+debug "Summary result: $SUMMARY_RESULT"
+
+# 解析状态和摘要（格式: status|summary）
+TASK_STATUS=$(echo "$SUMMARY_RESULT" | cut -d'|' -f1)
+SUMMARY=$(echo "$SUMMARY_RESULT" | cut -d'|' -f2-)
+
+debug "Status: $TASK_STATUS, Summary: $SUMMARY"
 
 # 确保 SUMMARY 不为空
 if [[ -z "$SUMMARY" ]]; then
     SUMMARY="任务已完成"
 fi
 
-NOTIFICATION_TYPE=$(get_notification_type "$EVENT_NAME" "$SUMMARY")
+NOTIFICATION_TYPE=$(get_notification_type "$TASK_STATUS")
 
 # --- 读取配置 ---
 if [[ -f "$CONFIG_FILE" ]]; then

@@ -8,9 +8,68 @@ Claude Bell - 智能任务摘要提取器
 
 import json
 import sys
+import re
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
+
+
+# 错误关键词
+ERROR_PATTERNS = [
+    r'API Error',
+    r'Error:',
+    r'403',
+    r'401',
+    r'500',
+    r'failed',
+    r'失败',
+    r'forbidden',
+    r'unauthorized',
+    r'timeout',
+    r'connection refused',
+    r'/login',
+    r'permission denied',
+]
+
+# 需要用户操作的关键词
+ACTION_PATTERNS = [
+    r'please run',
+    r'请运行',
+    r'需要.*确认',
+    r'waiting for',
+    r'approve',
+]
+
+
+def detect_status(messages: list) -> str:
+    """检测任务状态：success/error/action_needed"""
+    # 检查最后几条消息
+    recent_messages = messages[-10:] if len(messages) > 10 else messages
+
+    for msg in reversed(recent_messages):
+        content = ''
+
+        # 获取消息内容
+        if msg.get('type') == 'assistant':
+            content = str(msg.get('content', ''))
+        elif msg.get('type') == 'tool_result':
+            content = str(msg.get('tool_output', ''))
+        elif msg.get('type') == 'user':
+            content = str(msg.get('content', ''))
+
+        content_lower = content.lower()
+
+        # 检查错误
+        for pattern in ERROR_PATTERNS:
+            if re.search(pattern, content, re.IGNORECASE):
+                return 'error'
+
+        # 检查需要操作
+        for pattern in ACTION_PATTERNS:
+            if re.search(pattern, content, re.IGNORECASE):
+                return 'action_needed'
+
+    return 'success'
 
 
 def parse_transcript(transcript_path: str) -> dict:
@@ -60,39 +119,53 @@ def parse_transcript(transcript_path: str) -> dict:
         'tools_used': dict(tools_used),
         'files_modified': list(files_modified)[:5],
         'bash_commands': bash_commands[:3],
-        'total_messages': len(messages)
+        'total_messages': len(messages),
+        'status': detect_status(messages)
     }
 
 
 def extract_user_query(messages: list) -> str:
-    """提取用户的原始需求"""
+    """提取最后一个有意义的用户需求"""
     # 跳过的控制命令
-    skip_commands = {'ultrawork', 'continue', 'ok', 'yes', 'no', 'y', 'n', '继续', '好的', '是'}
+    skip_commands = {'ultrawork', 'continue', 'ok', 'yes', 'no', 'y', 'n', '继续', '好的', '是', '好', '可以', '确认'}
 
-    for msg in messages:
+    # 从后往前找最后一个有意义的用户消息
+    for msg in reversed(messages):
         if msg.get('type') == 'user':
             content = msg.get('content', '')
             if isinstance(content, str):
-                content_lower = content.strip().lower()
+                content_stripped = content.strip()
+                content_lower = content_stripped.lower()
                 # 跳过控制命令
                 if content_lower in skip_commands:
                     continue
                 # 跳过太短的内容
-                if len(content.strip()) < 5:
+                if len(content_stripped) < 3:
                     continue
                 # 返回截断的内容
-                return content[:100] + ('...' if len(content) > 100 else '')
+                return content_stripped[:100] + ('...' if len(content_stripped) > 100 else '')
 
-    return '任务已完成'
+    return ''
 
 
 def calculate_duration(messages: list) -> str:
-    """计算会话时长"""
+    """计算最近一轮任务的时长"""
     if len(messages) < 2:
         return ''
 
     try:
-        first_ts = messages[0].get('timestamp', '')
+        # 找到最后一个用户消息的位置
+        last_user_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get('type') == 'user':
+                last_user_idx = i
+                break
+
+        if last_user_idx < 0:
+            return ''
+
+        # 计算从最后一个用户消息到最后一条消息的时长
+        first_ts = messages[last_user_idx].get('timestamp', '')
         last_ts = messages[-1].get('timestamp', '')
 
         if first_ts and last_ts:
@@ -102,7 +175,10 @@ def calculate_duration(messages: list) -> str:
             duration = end - start
 
             total_seconds = int(duration.total_seconds())
-            if total_seconds < 0:
+            if total_seconds < 0 or total_seconds > 3600:  # 超过1小时可能是数据问题
+                return ''
+
+            if total_seconds < 5:  # 太短不显示
                 return ''
 
             minutes = total_seconds // 60
@@ -118,19 +194,48 @@ def calculate_duration(messages: list) -> str:
     return ''
 
 
-def generate_summary(transcript_path: str) -> str:
-    """生成任务摘要"""
+def get_error_message(messages: list) -> str:
+    """提取错误信息"""
+    recent_messages = messages[-5:] if len(messages) > 5 else messages
+
+    for msg in reversed(recent_messages):
+        content = ''
+        if msg.get('type') == 'assistant':
+            content = str(msg.get('content', ''))
+        elif msg.get('type') == 'tool_result':
+            content = str(msg.get('tool_output', ''))
+
+        # 查找 API Error 等错误信息
+        match = re.search(r'(API Error[^\n]*|Error:[^\n]*|403[^\n]*|failed[^\n]*)', content, re.IGNORECASE)
+        if match:
+            return match.group(1)[:60]
+
+    return ''
+
+
+def generate_summary(transcript_path: str) -> dict:
+    """生成任务摘要，返回 {status, summary}"""
     data = parse_transcript(transcript_path)
 
     if 'error' in data:
-        return '任务完成'
+        return {'status': 'success', 'summary': '任务完成'}
 
     messages = data['messages']
     tools = data['tools_used']
-    files = data['files_modified']
+    status = data.get('status', 'success')
 
     # 提取用户查询
     query = extract_user_query(messages)
+
+    # 如果是错误状态，提取错误信息
+    if status == 'error':
+        error_msg = get_error_message(messages)
+        if error_msg:
+            return {'status': 'error', 'summary': error_msg}
+        return {'status': 'error', 'summary': '任务执行出错'}
+
+    if status == 'action_needed':
+        return {'status': 'action_needed', 'summary': query or '需要用户操作'}
 
     # 生成工具统计
     stats_parts = []
@@ -147,14 +252,14 @@ def generate_summary(transcript_path: str) -> str:
     if read_count > 0:
         stats_parts.append(f"读{read_count}文件")
 
-    # 计算时长
+    # 计算时长（只有成功时才显示）
     duration = calculate_duration(messages)
 
     # 构建最终摘要
     summary_parts = []
 
     # 用户查询（截断到60字符用于通知）
-    if query and query != '任务已完成':
+    if query:
         short_query = query[:60] + ('...' if len(query) > 60 else '')
         summary_parts.append(short_query)
 
@@ -162,14 +267,14 @@ def generate_summary(transcript_path: str) -> str:
     if stats_parts:
         summary_parts.append(' | '.join(stats_parts))
 
-    # 时长
+    # 时长（仅当有效时添加）
     if duration:
         summary_parts.append(f'耗时{duration}')
 
     if summary_parts:
-        return ' · '.join(summary_parts)
+        return {'status': 'success', 'summary': ' · '.join(summary_parts)}
     else:
-        return '任务完成'
+        return {'status': 'success', 'summary': '任务完成'}
 
 
 def main():
@@ -186,10 +291,11 @@ def main():
         transcript_path = sys.argv[1]
 
     if transcript_path and Path(transcript_path).exists():
-        summary = generate_summary(transcript_path)
-        print(summary)
+        result = generate_summary(transcript_path)
+        # 输出格式: status|summary
+        print(f"{result['status']}|{result['summary']}")
     else:
-        print('任务完成')
+        print('success|任务完成')
 
 
 if __name__ == '__main__':
