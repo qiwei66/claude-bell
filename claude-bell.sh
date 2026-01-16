@@ -98,22 +98,22 @@ extract_summary_and_status() {
     echo "success|任务完成"
 }
 
-# --- 根据状态确定通知类型 ---
+# --- 根据状态确定通知类型（不带 emoji，emoji 在标题中显示）---
 get_notification_type() {
     local status="$1"
 
     case "$status" in
         "error")
-            echo "❌ 任务失败"
+            echo "任务失败"
             ;;
         "action_needed")
-            echo "⚠️ 需要操作"
+            echo "需要操作"
             ;;
         "success")
-            echo "✅ 任务完成"
+            echo "任务完成"
             ;;
         *)
-            echo "🔔 Claude Bell"
+            echo "Claude Bell"
             ;;
     esac
 }
@@ -125,15 +125,16 @@ debug "Using transcript: $ACTUAL_TRANSCRIPT"
 SUMMARY_RESULT=$(extract_summary_and_status "$ACTUAL_TRANSCRIPT")
 debug "Summary result: $SUMMARY_RESULT"
 
-# 解析状态和摘要（格式: status|summary）
+# 解析输出（格式: status|query|stats）
 TASK_STATUS=$(echo "$SUMMARY_RESULT" | cut -d'|' -f1)
-SUMMARY=$(echo "$SUMMARY_RESULT" | cut -d'|' -f2-)
+TASK_QUERY=$(echo "$SUMMARY_RESULT" | cut -d'|' -f2)
+TASK_STATS=$(echo "$SUMMARY_RESULT" | cut -d'|' -f3)
 
-debug "Status: $TASK_STATUS, Summary: $SUMMARY"
+debug "Status: $TASK_STATUS, Query: $TASK_QUERY, Stats: $TASK_STATS"
 
-# 确保 SUMMARY 不为空
-if [[ -z "$SUMMARY" ]]; then
-    SUMMARY="任务已完成"
+# 确保 TASK_QUERY 不为空
+if [[ -z "$TASK_QUERY" ]]; then
+    TASK_QUERY="任务已完成"
 fi
 
 NOTIFICATION_TYPE=$(get_notification_type "$TASK_STATUS")
@@ -161,22 +162,21 @@ send_mac_notification() {
         return
     fi
 
-    # 格式：标题突出项目名（方便识别并行任务）
-    # 标题: ✅ 项目名
-    # 副标题: 状态类型
-    # 正文: 任务描述
-    local status_emoji=""
-    case "$TASK_STATUS" in
-        "error") status_emoji="❌" ;;
-        "action_needed") status_emoji="⚠️" ;;
-        *) status_emoji="✅" ;;
-    esac
+    # 格式仿照 Claude 官方通知风格:
+    # 标题: 项目名
+    # 副标题: 任务描述（用户原始需求）
+    # 正文: 状态 + 统计信息
+    local title="$PROJECT_NAME"
+    local subtitle="$TASK_QUERY"
+    local body="$NOTIFICATION_TYPE"
 
-    local title="${status_emoji} ${PROJECT_NAME}"
-    local subtitle="$NOTIFICATION_TYPE"
-    local body="$SUMMARY"
+    # 如果有统计信息，添加到正文
+    if [[ -n "$TASK_STATS" ]]; then
+        body="$body · $TASK_STATS"
+    fi
 
     # 清理特殊字符
+    subtitle=$(echo "$subtitle" | tr '\n' ' ' | sed 's/"/\\"/g')
     body=$(echo "$body" | tr '\n' ' ' | sed 's/"/\\"/g')
 
     # 优先使用 terminal-notifier
@@ -203,22 +203,17 @@ send_bark_notification() {
         return
     fi
 
-    # 格式：标题突出项目名（方便识别并行任务）
-    # 标题: ✅ 项目名
-    # 正文: 任务描述
-    local status_emoji=""
-    case "$TASK_STATUS" in
-        "error") status_emoji="❌" ;;
-        "action_needed") status_emoji="⚠️" ;;
-        *) status_emoji="✅" ;;
-    esac
+    # 格式仿照 Claude 官方通知风格:
+    # 标题: 项目名
+    # 正文: 任务描述 + 状态/统计
+    local title="$PROJECT_NAME"
+    local body="$TASK_QUERY"
 
-    local title="${status_emoji} ${PROJECT_NAME}"
-    local body="$SUMMARY"
-
-    # 确保 body 不为空
-    if [[ -z "$body" ]]; then
-        body="任务已完成"
+    # 添加状态和统计信息
+    if [[ -n "$TASK_STATS" ]]; then
+        body="$body"$'\n'"$NOTIFICATION_TYPE · $TASK_STATS"
+    else
+        body="$body"$'\n'"$NOTIFICATION_TYPE"
     fi
 
     debug "Sending Bark: title=$title, body=$body"
@@ -254,7 +249,7 @@ send_bark_notification() {
 main() {
     log "=== Claude Bell triggered ==="
     log "Event: $EVENT_NAME | Project: $PROJECT_NAME | Session: $SESSION_ID"
-    log "Summary: $SUMMARY"
+    log "Query: $TASK_QUERY | Stats: $TASK_STATS | Status: $TASK_STATUS"
 
     # 发送 Mac 通知
     send_mac_notification

@@ -41,23 +41,75 @@ ACTION_PATTERNS = [
 ]
 
 
+def extract_text_from_content(content) -> str:
+    """从 content 中提取文本（支持字符串和数组格式）"""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        # content 是数组，提取所有 type="text" 的 text 字段
+        texts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get('type') == 'text':
+                    text = item.get('text', '')
+                    if text:
+                        texts.append(text)
+        return '\n'.join(texts)
+
+    return ''
+
+
 def detect_status(messages: list) -> str:
     """检测任务状态：success/error/action_needed"""
-    # 检查最后几条消息
-    recent_messages = messages[-10:] if len(messages) > 10 else messages
+    # 找到最后一个有内容的用户消息（跳过只有图片的消息）
+    last_meaningful_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg.get('type') == 'user':
+            # 检查是否有文本内容
+            message_obj = msg.get('message', {})
+            if isinstance(message_obj, dict):
+                content = extract_text_from_content(message_obj.get('content', ''))
+                if content and len(content.strip()) > 3:
+                    last_meaningful_user_idx = i
+                    break
+
+    # 从最后一个有意义的用户消息开始检查
+    start_idx = max(0, last_meaningful_user_idx)
+    recent_messages = messages[start_idx:]
 
     for msg in reversed(recent_messages):
+        msg_type = msg.get('type', '')
+
+        # 快速检测：isApiErrorMessage 标志
+        if msg.get('isApiErrorMessage'):
+            return 'error'
+
+        # 快速检测：error 字段
+        if msg.get('error'):
+            return 'error'
+
         content = ''
 
-        # 获取消息内容
-        if msg.get('type') == 'assistant':
-            content = str(msg.get('content', ''))
-        elif msg.get('type') == 'tool_result':
-            content = str(msg.get('tool_output', ''))
-        elif msg.get('type') == 'user':
-            content = str(msg.get('content', ''))
+        # 获取消息内容（支持多种格式）
+        if msg_type == 'assistant':
+            message_obj = msg.get('message', {})
+            if isinstance(message_obj, dict):
+                content = extract_text_from_content(message_obj.get('content', ''))
+            if not content:
+                content = extract_text_from_content(msg.get('content', ''))
+        elif msg_type == 'tool_result':
+            content = str(msg.get('tool_output', '') or msg.get('content', ''))
+        elif msg_type == 'user':
+            message_obj = msg.get('message', {})
+            if isinstance(message_obj, dict):
+                content = extract_text_from_content(message_obj.get('content', ''))
+            if not content:
+                content = extract_text_from_content(msg.get('content', ''))
 
-        content_lower = content.lower()
+        if not content:
+            continue
 
         # 检查错误
         for pattern in ERROR_PATTERNS:
@@ -122,25 +174,6 @@ def parse_transcript(transcript_path: str) -> dict:
         'total_messages': len(messages),
         'status': detect_status(messages)
     }
-
-
-def extract_text_from_content(content) -> str:
-    """从 content 中提取文本（支持字符串和数组格式）"""
-    if isinstance(content, str):
-        return content
-
-    if isinstance(content, list):
-        # content 是数组，提取所有 type="text" 的 text 字段
-        texts = []
-        for item in content:
-            if isinstance(item, dict):
-                if item.get('type') == 'text':
-                    text = item.get('text', '')
-                    if text:
-                        texts.append(text)
-        return '\n'.join(texts)
-
-    return ''
 
 
 def extract_user_query(messages: list) -> str:
@@ -243,19 +276,28 @@ def calculate_duration(messages: list) -> str:
 
 def get_error_message(messages: list) -> str:
     """提取错误信息"""
-    recent_messages = messages[-5:] if len(messages) > 5 else messages
+    recent_messages = messages[-10:] if len(messages) > 10 else messages
 
     for msg in reversed(recent_messages):
         content = ''
-        if msg.get('type') == 'assistant':
-            content = str(msg.get('content', ''))
-        elif msg.get('type') == 'tool_result':
-            content = str(msg.get('tool_output', ''))
+        msg_type = msg.get('type', '')
+
+        if msg_type == 'assistant':
+            message_obj = msg.get('message', {})
+            if isinstance(message_obj, dict):
+                content = extract_text_from_content(message_obj.get('content', ''))
+            if not content:
+                content = extract_text_from_content(msg.get('content', ''))
+        elif msg_type == 'tool_result':
+            content = str(msg.get('tool_output', '') or msg.get('content', ''))
+
+        if not content:
+            continue
 
         # 查找 API Error 等错误信息
         match = re.search(r'(API Error[^\n]*|Error:[^\n]*|403[^\n]*|failed[^\n]*)', content, re.IGNORECASE)
         if match:
-            return match.group(1)[:60]
+            return match.group(1)[:80]
 
     return ''
 
@@ -277,12 +319,20 @@ def generate_summary(transcript_path: str) -> dict:
     # 如果是错误状态，提取错误信息
     if status == 'error':
         error_msg = get_error_message(messages)
-        if error_msg:
-            return {'status': 'error', 'summary': error_msg}
-        return {'status': 'error', 'summary': '任务执行出错'}
+        short_query = query[:60] + ('...' if len(query) > 60 else '') if query else ''
+        return {
+            'status': 'error',
+            'query': short_query or '任务执行出错',
+            'stats': error_msg or ''
+        }
 
     if status == 'action_needed':
-        return {'status': 'action_needed', 'summary': query or '需要用户操作'}
+        short_query = query[:60] + ('...' if len(query) > 60 else '') if query else '需要用户操作'
+        return {
+            'status': 'action_needed',
+            'query': short_query,
+            'stats': ''
+        }
 
     # 生成工具统计
     stats_parts = []
@@ -299,29 +349,23 @@ def generate_summary(transcript_path: str) -> dict:
     if read_count > 0:
         stats_parts.append(f"读{read_count}文件")
 
-    # 计算时长（只有成功时才显示）
+    # 计算时长
     duration = calculate_duration(messages)
 
-    # 构建最终摘要
-    summary_parts = []
+    # 构建统计信息
+    if duration:
+        stats_parts.append(f'耗时{duration}')
+
+    stats = ' · '.join(stats_parts) if stats_parts else ''
 
     # 用户查询（截断到60字符用于通知）
-    if query:
-        short_query = query[:60] + ('...' if len(query) > 60 else '')
-        summary_parts.append(short_query)
+    short_query = query[:60] + ('...' if len(query) > 60 else '') if query else '任务完成'
 
-    # 统计信息
-    if stats_parts:
-        summary_parts.append(' | '.join(stats_parts))
-
-    # 时长（仅当有效时添加）
-    if duration:
-        summary_parts.append(f'耗时{duration}')
-
-    if summary_parts:
-        return {'status': 'success', 'summary': ' · '.join(summary_parts)}
-    else:
-        return {'status': 'success', 'summary': '任务完成'}
+    return {
+        'status': 'success',
+        'query': short_query,
+        'stats': stats
+    }
 
 
 def main():
@@ -339,10 +383,10 @@ def main():
 
     if transcript_path and Path(transcript_path).exists():
         result = generate_summary(transcript_path)
-        # 输出格式: status|summary
-        print(f"{result['status']}|{result['summary']}")
+        # 输出格式: status|query|stats
+        print(f"{result['status']}|{result['query']}|{result.get('stats', '')}")
     else:
-        print('success|任务完成')
+        print('success|任务完成|')
 
 
 if __name__ == '__main__':
