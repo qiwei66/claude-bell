@@ -124,26 +124,73 @@ def parse_transcript(transcript_path: str) -> dict:
     }
 
 
+def extract_text_from_content(content) -> str:
+    """从 content 中提取文本（支持字符串和数组格式）"""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        # content 是数组，提取所有 type="text" 的 text 字段
+        texts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get('type') == 'text':
+                    text = item.get('text', '')
+                    if text:
+                        texts.append(text)
+        return '\n'.join(texts)
+
+    return ''
+
+
 def extract_user_query(messages: list) -> str:
     """提取最后一个有意义的用户需求"""
-    # 跳过的控制命令
-    skip_commands = {'ultrawork', 'continue', 'ok', 'yes', 'no', 'y', 'n', '继续', '好的', '是', '好', '可以', '确认'}
+    # 跳过的控制命令（小写匹配）
+    skip_commands = {
+        'ultrawork', 'continue', 'ok', 'yes', 'no', 'y', 'n',
+        '继续', '好的', '是', '好', '可以', '确认', '嗯', '行',
+        'go', 'next', 'done', 'thanks', '谢谢', '感谢'
+    }
 
     # 从后往前找最后一个有意义的用户消息
     for msg in reversed(messages):
         if msg.get('type') == 'user':
-            content = msg.get('content', '')
-            if isinstance(content, str):
-                content_stripped = content.strip()
-                content_lower = content_stripped.lower()
-                # 跳过控制命令
-                if content_lower in skip_commands:
-                    continue
-                # 跳过太短的内容
-                if len(content_stripped) < 3:
-                    continue
-                # 返回截断的内容
-                return content_stripped[:100] + ('...' if len(content_stripped) > 100 else '')
+            # 尝试从 message.content 提取（新格式）
+            message_obj = msg.get('message', {})
+            if isinstance(message_obj, dict):
+                content = extract_text_from_content(message_obj.get('content', ''))
+            else:
+                content = ''
+
+            # 如果没找到，尝试直接从 content 提取（旧格式）
+            if not content:
+                content = extract_text_from_content(msg.get('content', ''))
+
+            if not content:
+                continue
+
+            content_stripped = content.strip()
+            content_lower = content_stripped.lower()
+
+            # 跳过控制命令
+            if content_lower in skip_commands:
+                continue
+
+            # 跳过太短的内容
+            if len(content_stripped) < 5:
+                continue
+
+            # 跳过只有符号的内容
+            if content_stripped in ['...', '。。。', '???', '！！！']:
+                continue
+
+            # 提取第一行作为摘要（通常是主要任务）
+            first_line = content_stripped.split('\n')[0].strip()
+            if len(first_line) > 5:
+                return first_line[:80] + ('...' if len(first_line) > 80 else '')
+
+            # 如果第一行太短，用完整内容
+            return content_stripped[:80] + ('...' if len(content_stripped) > 80 else '')
 
     return ''
 

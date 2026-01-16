@@ -161,13 +161,23 @@ send_mac_notification() {
         return
     fi
 
-    local title="$NOTIFICATION_TYPE"
-    local subtitle="$PROJECT_NAME"
+    # 格式：标题突出项目名（方便识别并行任务）
+    # 标题: ✅ 项目名
+    # 副标题: 状态类型
+    # 正文: 任务描述
+    local status_emoji=""
+    case "$TASK_STATUS" in
+        "error") status_emoji="❌" ;;
+        "action_needed") status_emoji="⚠️" ;;
+        *) status_emoji="✅" ;;
+    esac
+
+    local title="${status_emoji} ${PROJECT_NAME}"
+    local subtitle="$NOTIFICATION_TYPE"
     local body="$SUMMARY"
 
     # 清理特殊字符
     body=$(echo "$body" | tr '\n' ' ' | sed 's/"/\\"/g')
-    subtitle=$(echo "$subtitle" | sed 's/"/\\"/g')
 
     # 优先使用 terminal-notifier
     if command -v terminal-notifier &>/dev/null; then
@@ -176,7 +186,7 @@ send_mac_notification() {
             -subtitle "$subtitle" \
             -message "$body" \
             -sound "default" \
-            -group "claude-bell" \
+            -group "claude-bell-${PROJECT_NAME}" \
             -ignoreDnD \
             2>/dev/null || true
         log "Mac notification sent (terminal-notifier): $title | $subtitle | $body"
@@ -193,12 +203,22 @@ send_bark_notification() {
         return
     fi
 
-    local title="$NOTIFICATION_TYPE"
-    local body="${PROJECT_NAME}: ${SUMMARY}"
+    # 格式：标题突出项目名（方便识别并行任务）
+    # 标题: ✅ 项目名
+    # 正文: 任务描述
+    local status_emoji=""
+    case "$TASK_STATUS" in
+        "error") status_emoji="❌" ;;
+        "action_needed") status_emoji="⚠️" ;;
+        *) status_emoji="✅" ;;
+    esac
+
+    local title="${status_emoji} ${PROJECT_NAME}"
+    local body="$SUMMARY"
 
     # 确保 body 不为空
-    if [[ -z "$body" || "$body" == ": " ]]; then
-        body="$PROJECT_NAME: 任务已完成"
+    if [[ -z "$body" ]]; then
+        body="任务已完成"
     fi
 
     debug "Sending Bark: title=$title, body=$body"
